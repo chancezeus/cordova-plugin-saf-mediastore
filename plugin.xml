@@ -1,32 +1,41 @@
 <?xml version="1.0" encoding="utf-8"?>
 <plugin xmlns:android="http://schemas.android.com/apk/res/android"
-	id="cordova-plugin-saf-mediastore" version="0.7.0"
-	xmlns="http://www.w3.org/ns/plugins">
+    id="cordova-plugin-saf-mediastore" version="0.7.0" xmlns="http://www.w3.org/ns/plugins">
 
-	<name>cordova-plugin-saf-mediastore</name>
+    <name>cordova-plugin-saf-mediastore</name>
 
-	<engines>
-		<engine name="cordova" version=">=3.4.0"/>
-	</engines>
+    <engines>
+        <engine name="cordova" version=">=3.4.0" />
+    </engines>
 
-	<asset src="www/safMediastore.js" target="js/safMediastore.js"/>
+    <js-module name="safMediastore" src="www/safMediastore.js">
+        <clobbers target="cordova.plugins.safMediastore" />
+    </js-module>
 
-	<js-module name="safMediastore" src="www/safMediastore.js">
-		<clobbers target="cordova.plugins.safMediastore"/>
-	</js-module>
+    <platform name="android">
+        <config-file parent="/*" target="res/xml/config.xml">
+            <feature name="SafMediastore">
+                <param name="android-package"
+                    value="com.customautosys.saf_mediastore.SafMediastore" />
+            </feature>
+        </config-file>
 
-	<platform name="android">
-		<config-file parent="/*" target="res/xml/config.xml">
-			<feature name="SafMediastore">
-				<param name="android-package" value="com.customautosys.saf_mediastore.SafMediastore"/>
-			</feature>
-		</config-file>
+        <config-file parent="/manifest" target="AndroidManifest.xml">
+            <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+                android:maxSdkVersion="32" />
+            <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                android:maxSdkVersion="28" />
+            <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"
+                android:minSdkVersion="33" />
+            <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"
+                android:minSdkVersion="33" />
+            <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"
+                android:minSdkVersion="33" />
+        </config-file>
 
-		<config-file parent="/manifest" target="AndroidManifest.xml">
-			<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"/>
-			<uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"/>
-		</config-file>
+        <source-file src="src/android/com/customautosys/saf_mediastore/SafMediastore.java"
+            target-dir="src/com/customautosys/saf_mediastore/" />
 
-		<source-file src="src/android/com/customautosys/saf_mediastore/SafMediastore.java" target-dir="src/com/customautosys/saf_mediastore/"/>
-	</platform>
+        <framework src="androidx.documentfile:documentfile:1.0.1" />
+    </platform>
 </plugin>

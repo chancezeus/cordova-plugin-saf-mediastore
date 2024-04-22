@@ -4,23 +4,24 @@ import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
-import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
-import android.os.Environment;
 import android.os.FileUtils;
 import android.provider.DocumentsContract;
 import android.provider.MediaStore;
-import android.provider.OpenableColumns;
 import android.util.Base64;
+import android.util.Base64InputStream;
+import android.util.Base64OutputStream;
 import android.util.Log;
 import android.webkit.MimeTypeMap;
 import android.webkit.ValueCallback;
 
-import androidx.annotation.RequiresApi;
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
 
 import org.apache.cordova.CallbackContext;
+import org.apache.cordova.CordovaArgs;
 import org.apache.cordova.CordovaInterface;
 import org.apache.cordova.CordovaPlugin;
 import org.apache.cordova.CordovaWebView;
@@ -28,423 +29,862 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.HashMap;
+import java.util.Map;
 
-public class SafMediastore extends CordovaPlugin implements ValueCallback<String>{
-	protected CallbackContext callbackContext;
-	protected HashMap<String,String> saveFileData=new HashMap<>();
-	protected CordovaInterface cordovaInterface;
-	protected CordovaWebView cordovaWebView;
+/**
+ * @noinspection StringEqualsEmptyString, Convert2Lambda
+ */
+public class SafMediastore extends CordovaPlugin implements ValueCallback<String> {
+    private short lastCallbackIndex = 0;
+    private final HashMap<Short, CallbackContext> callbackContexts = new HashMap<>();
+    private final HashMap<String, String> saveFileData = new HashMap<>();
+    private CordovaInterface cordovaInterface;
+    private CordovaWebView cordovaWebView;
 
-	public enum Action {
-		selectFolder,
-		selectFile,
-		openFolder,
-		openFile,
-		readFile,
-		writeFile,
-		saveFile
-	}
+    public enum Action {
+        selectFolder((short) 0x5162),
+        selectFile((short) 0x5163),
+        saveFile((short) 0x5164);
 
-	@Override
-	public void initialize(CordovaInterface cordovaInterface,CordovaWebView cordovaWebView){
-		this.cordovaInterface=cordovaInterface;
-		this.cordovaWebView=cordovaWebView;
-	}
+        private static final Map<Short, Action> BY_VALUE = new HashMap<>();
 
-	@Override
-	public boolean execute(String action,JSONArray args,CallbackContext callbackContext)throws JSONException{
-		Method method=null;
-		try{
-			method=this.getClass().getMethod(action,JSONArray.class,CallbackContext.class);
-		}catch(Exception e){
-			debugLog(e);
-		}
-		if(method==null||!Modifier.isPublic(method.getModifiers()))return false;
-		try{
-			return (Boolean)method.invoke(this,args,callbackContext);
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+        static {
+            for (Action a : values()) {
+                BY_VALUE.put(a.value, a);
+            }
+        }
 
-	public boolean selectFolder(JSONArray args,CallbackContext callbackContext)throws JSONException{
-		Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-		String initialFolder=null;
-		try{
-			if(!args.isNull(0))initialFolder=args.getString(0);
-		}catch(JSONException e){
-			debugLog(e);
-		}
-		if(initialFolder!=null)intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,initialFolder);
-		this.callbackContext=callbackContext;
-		cordovaInterface.startActivityForResult(this,intent,Action.selectFolder.ordinal());
-		return true;
-	}
+        public final short value;
 
-	public boolean selectFile(JSONArray args,CallbackContext callbackContext)throws JSONException{
-		Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);
-		String initialFolder=null;
-		try{
-			if(!args.isNull(0))initialFolder=args.getString(0);
-		}catch(JSONException e){
-			debugLog(e);
-		}
-		if(initialFolder!=null)intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,initialFolder);
-		intent.addCategory(Intent.CATEGORY_OPENABLE);
-		intent.setType("*/*");
-		intent.putExtra(Intent.EXTRA_MIME_TYPES,new String[]{"*/*"});
-		intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-		this.callbackContext=callbackContext;
-		cordovaInterface.startActivityForResult(this,Intent.createChooser(intent,"Select File"),Action.selectFile.ordinal());
-		return true;
-	}
+        Action(short value) {
+            this.value = value;
+        }
 
-	public boolean openFolder(JSONArray args,CallbackContext callbackContext){
-		try{
-			Intent intent=new Intent(Intent.ACTION_VIEW);
-			intent.setDataAndType(Uri.parse(args.getString(0)),DocumentsContract.Document.MIME_TYPE_DIR);
-			this.callbackContext=callbackContext;
-			cordovaInterface.startActivityForResult(this,Intent.createChooser(intent,"Open folder"),Action.openFolder.ordinal());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+        public static @Nullable Action valueOf(short value) {
+            return BY_VALUE.get(value);
+        }
+    }
 
-	public boolean openFile(JSONArray args,CallbackContext callbackContext){
-		try{
-			String uriString=args.getString(0);
-			Uri uri=Uri.parse(uriString);
-			Intent intent=new Intent(Intent.ACTION_VIEW);
-			String mimeType=cordovaInterface.getContext().getContentResolver().getType(uri);
-			if(mimeType==null)mimeType="*/*";
-			intent.setDataAndType(uri,mimeType);
-			this.callbackContext=callbackContext;
-			cordovaInterface.startActivityForResult(this,intent,Action.openFile.ordinal());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+    @Override
+    public void initialize(@NonNull CordovaInterface cordovaInterface, @NonNull CordovaWebView cordovaWebView) {
+        this.cordovaInterface = cordovaInterface;
+        this.cordovaWebView = cordovaWebView;
+    }
 
-	@RequiresApi(api=Build.VERSION_CODES.Q)
-	public boolean readFile(JSONArray args,CallbackContext callbackContext){
-		try(
-			InputStream inputStream=cordovaInterface.getContext().getContentResolver().openInputStream(Uri.parse(args.getString(0)));
-			ByteArrayOutputStream byteArrayOutputStream=new ByteArrayOutputStream()
-		){
-			FileUtils.copy(inputStream, byteArrayOutputStream);
-			callbackContext.success(byteArrayOutputStream.toByteArray());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+    @Override
+    public boolean execute(@NonNull String action, @NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) {
+        try {
+            if (action.equals("selectFolder")) {
+                selectFolder(args, callbackContext);
 
-	public boolean writeFile(JSONArray args,CallbackContext callbackContext){
-		try{
-			JSONObject params=args.getJSONObject(0);
-			String filename=params.getString("filename");
-			String mimeType=MimeTypeMap.getSingleton().getMimeTypeFromExtension(filename.substring(filename.lastIndexOf('.')+1));
-			if(mimeType==null)mimeType="*/*";
-			String folder=null;
-			try{
-				if(!params.isNull("folder"))folder=params.getString("folder");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			String subFolder="";
-			try{
-				if(!params.isNull("subFolder"))subFolder=params.getString("subFolder");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			Uri uri=null;
-			if(folder!=null&&!folder.trim().equals("")){
-				DocumentFile documentFile=DocumentFile.fromTreeUri(
-					cordovaInterface.getContext(),
-					Uri.parse(folder)
-				);
-				if(subFolder!=null){
-					String subFolders[]=subFolder.split("/");
-					for(int i=0;i<subFolders.length;++i){
-						DocumentFile subFolderDocumentFile=null;
-						for(DocumentFile subFile:documentFile.listFiles()){
-							if(subFile.isDirectory()&&subFile.getName().equals(subFolder)){
-								subFolderDocumentFile=subFile;
-								break;
-							}
-						}
-						documentFile=subFolderDocumentFile!=null?subFolderDocumentFile:documentFile.createDirectory(subFolders[i]);
-					}
-				}
-				DocumentFile file=null;
-				for(DocumentFile subFile:documentFile.listFiles()){
-					if(!subFile.isDirectory()&&subFile.getName().equals(filename)){
-						file=subFile;
-						break;
-					}
-				}
-				uri=(file!=null?file:documentFile.createFile(
-					mimeType,
-					filename
-				)).getUri();
-			}else{
-				ContentResolver contentResolver=cordovaInterface.getContext().getContentResolver();
-				ContentValues contentValues=new ContentValues();
-				contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME,filename);
-				contentValues.put(MediaStore.MediaColumns.MIME_TYPE,mimeType);
-				if(!subFolder.startsWith("/"))subFolder="/"+subFolder;
-				contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH,Environment.DIRECTORY_DOWNLOADS+subFolder);
-				uri=contentResolver.insert(MediaStore.Files.getContentUri("external"),contentValues);
-			}
-			try(OutputStream outputStream=cordovaInterface.getContext().getContentResolver().openOutputStream(uri,"wt")){
-				outputStream.write(Base64.decode(params.getString("data"),Base64.DEFAULT));
-			}
-			callbackContext.success(uri.toString());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+                return true;
+            }
 
-	public boolean overwriteFile(JSONArray args,CallbackContext callbackContext){
-		try{
-			JSONObject params=args.getJSONObject(0);
-			Uri uri=Uri.parse(params.getString("uri"));
-			try(OutputStream outputStream=cordovaInterface.getContext().getContentResolver().openOutputStream(uri,"wt")){
-				outputStream.write(Base64.decode(params.getString("data"),Base64.DEFAULT));
-			}
-			callbackContext.success(uri.toString());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+            if (action.equals("selectFile")) {
+                selectFile(args, callbackContext);
 
-	public boolean saveFile(JSONArray args,CallbackContext callbackContext){
-		try{
-			JSONObject params=args.getJSONObject(0);
-			saveFileData.put(callbackContext.getCallbackId(),params.getString("data"));
-			Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);
-			intent.addCategory(Intent.CATEGORY_OPENABLE);
-			String filename=null;
-			try{
-				if(!params.isNull("filename"))filename=params.getString("filename");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			if(filename!=null){
-				String mimeType=MimeTypeMap.getSingleton().getMimeTypeFromExtension(filename.substring(filename.lastIndexOf('.')+1));
-				if(mimeType==null)mimeType="*/*";
-				intent.setType(mimeType);
-				intent.putExtra(Intent.EXTRA_TITLE,filename);
-			}
-			String folder=null;
-			try{
-				if(!params.isNull("folder"))folder=params.getString("folder");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			if(folder!=null)intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI,folder);
-			this.callbackContext=callbackContext;
-			cordovaInterface.startActivityForResult(this,intent,Action.saveFile.ordinal());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+                return true;
+            }
 
-	public boolean deleteFile(JSONArray args,CallbackContext callbackContext){
-		try{
-			callbackContext.success(cordovaInterface.getContext().getContentResolver().delete(Uri.parse(args.getString(0)),null));
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+            if (action.equals("openFolder")) {
+                openFolder(args, callbackContext);
 
-	public boolean getFileName(JSONArray args,CallbackContext callbackContext){
-		try(Cursor cursor=cordovaInterface.getContext().getContentResolver().query(Uri.parse(args.getString(0)),null,null,null,null)){
-			if(cursor!=null&&cursor.moveToFirst()){
-				callbackContext.success(cursor.getString(cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)));
-				return true;
-			}
-			callbackContext.error(args.getString(0)+" not found");
-			return false;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+                return true;
+            }
 
-	public boolean getUri(JSONArray args,CallbackContext callbackContext){
-		try{
-			JSONObject params=args.getJSONObject(0);
-			String folder=null;
-			try{
-				if(!params.isNull("folder"))params.getString("folder");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			DocumentFile documentFile=DocumentFile.fromTreeUri(
-					cordovaInterface.getContext(),
-					Uri.parse(folder)
-			);
-			String subFolder=null;
-			try {
-				if(!params.isNull("subFolder"))subFolder=params.getString("subFolder");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			if(subFolder!=null){
-				String subFolders[]=subFolder.split("/");
-				for(int i=0;i<subFolders.length;++i){
-					DocumentFile subFolderDocumentFile=null;
-					for(DocumentFile subFile:documentFile.listFiles()){
-						if(subFile.isDirectory()&&subFile.getName().equals(subFolder)){
-							subFolderDocumentFile=subFile;
-							break;
-						}
-					}
-					if(subFolderDocumentFile==null)throw new Exception("Subfolder not found in "+folder+": "+subFolder);
-					documentFile=subFolderDocumentFile;
-				}
-			}
-			String filename=null;
-			try {
-				if(!params.isNull("filename"))filename=params.getString("filename");
-			}catch(Exception e){
-				debugLog(e);
-			}
-			if(filename==null){
-				callbackContext.success(documentFile.getUri().toString());
-				return true;
-			}
-			DocumentFile file=null;
-			for(DocumentFile subFile:documentFile.listFiles()){
-				if(!subFile.isDirectory()&&subFile.getName().equals(filename)){
-					file=subFile;
-					break;
-				}
-			}
-			if(file==null)throw new Exception("File not found in "+subFolder+" of "+folder+": "+filename);
-			callbackContext.success(file.getUri().toString());
-			return true;
-		}catch(Exception e){
-			callbackContext.error(debugLog(e));
-			return false;
-		}
-	}
+            if (action.equals("openFile")) {
+                openFile(args, callbackContext);
 
-	@Override
-	public void onActivityResult(int requestCode,int resultCode,Intent intent){
-		if(callbackContext==null){
-			debugLog("callbackContext==null in onActivityResult");
-			return;
-		}
-		if(requestCode<0||requestCode>=Action.values().length){
-			callbackContext.error(debugLog("Invalid request code: "+requestCode));
-			return;
-		}
-		switch(Action.values()[requestCode]){
-			case selectFolder:
-			case selectFile:
-				if(resultCode!=Activity.RESULT_OK){
-					callbackContext.error(debugLog("Cancelled"));
-					return;
-				}
-				callbackContext.success(intent.getDataString());
-				break;
-			case openFolder:
-			case openFile:
-				callbackContext.success();
-				break;
-			case saveFile:
-				if(resultCode!=Activity.RESULT_OK){
-					callbackContext.error(debugLog("Cancelled"));
-					return;
-				}
-				String data=saveFileData.remove(callbackContext.getCallbackId());
-				if(data==null){
-					callbackContext.error(debugLog("No saveFileData in onActivityResult"));
-					break;
-				}
-				try(OutputStream outputStream=cordovaInterface.getContext().getContentResolver().openOutputStream(intent.getData(),"wt")){
-					outputStream.write(Base64.decode(data,Base64.DEFAULT));
-					callbackContext.success(intent.getDataString());
-				}catch(Exception e){
-					callbackContext.error(debugLog(e));
-				}
-				break;
-			default:
-				callbackContext.error(debugLog("Invalid request code: "+Action.values()[requestCode].toString()));
-		}
-	}
+                return true;
+            }
 
-	public String debugLog(Throwable throwable){
-		try {
-			StringWriter stringWriter = new StringWriter();
-			PrintWriter printWriter = new PrintWriter(stringWriter);
-			throwable.printStackTrace(printWriter);
-			String stackTrace=stringWriter.toString();
-			Log.d(throwable.getLocalizedMessage(),stackTrace,throwable);
-			cordovaWebView.getEngine().evaluateJavascript(
-				"console.log('" +stackTrace.replace(
-					"'",
-					"\\'"
-				).replace(
-					"\n",
-					"\\n"
-				).replace(
-					"\t",
-					"\\t"
-				)+"');",
-				this
-			);
-			printWriter.close();
-			stringWriter.close();
-			return stackTrace;
-		}catch(Exception e){
-			e.printStackTrace();
-			return "";
-		}
-	}
+            if (action.equals("readFile")) {
+                readFile(args, callbackContext);
 
-	public String debugLog(String message){
-		Log.d(getClass().getName(),message);
-		cordovaWebView.getEngine().evaluateJavascript(
-			"console.log('" +message.replace(
-				"'",
-				"\\'"
-			).replace(
-				"\n",
-				"\\n"
-			).replace(
-				"\t",
-				"\\t"
-			)+"');",
-			this
-		);
-		return message;
-	}
+                return true;
+            }
 
-	@Override
-	public void onReceiveValue(String value){}
+            if (action.equals("saveFile")) {
+                saveFile(args, callbackContext);
+
+                return true;
+            }
+
+            if (action.equals("writeFile")) {
+                writeFile(args, callbackContext);
+
+                return true;
+            }
+
+            if (action.equals("writeMedia")) {
+                writeMedia(args, callbackContext);
+
+                return true;
+            }
+
+            if (action.equals("overwriteFile")) {
+                overwriteFile(args, callbackContext);
+
+                return true;
+            }
+
+            if (action.equals("deleteFile")) {
+                deleteFile(args, callbackContext);
+
+                return true;
+            }
+
+            if (action.equals("getInfo")) {
+                getInfo(args, callbackContext);
+
+                return true;
+            }
+
+            if (action.equals("getUri")) {
+                getUri(args, callbackContext);
+
+                return true;
+            }
+
+            return false;
+        } catch (Throwable t) {
+            onError(t, callbackContext);
+
+            return true;
+        }
+    }
+
+    @Override
+    public void onActivityResult(int requestCode, int resultCode, final Intent intent) {
+        short actionCode = (short) ((requestCode >> 16) & 0xFFFF);
+        short callbackIndex = (short) (requestCode & 0xFFFF);
+
+        final CallbackContext callbackContext = callbackContexts.get(callbackIndex);
+        if (callbackContext == null) {
+            onError("callbackContext==null in onActivityResult");
+            return;
+        }
+
+        final Action action = Action.valueOf(actionCode);
+        if (action == null) {
+            onError("Invalid request code: " + actionCode);
+            return;
+        }
+
+        callbackContexts.remove(callbackIndex);
+
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (action == Action.saveFile) {
+                        Uri uri = intent.getData();
+                        if (resultCode != Activity.RESULT_OK || uri == null) {
+                            onError("Cancelled", callbackContext);
+                            return;
+                        }
+
+                        String data = saveFileData.remove(callbackContext.getCallbackId());
+                        if (data == null) {
+                            onError("No saveFileData in onActivityResult", callbackContext);
+                            return;
+                        }
+
+                        writeFile(uri, data, callbackContext);
+
+                        return;
+                    }
+
+                    Uri uri = intent.getData();
+                    if (resultCode != Activity.RESULT_OK || uri == null) {
+                        onError("Cancelled", callbackContext);
+                        return;
+                    }
+
+                    ContentResolver resolver = cordovaInterface.getContext().getContentResolver();
+
+                    int permissions = intent.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    resolver.takePersistableUriPermission(uri, permissions);
+
+                    fileInfo(uri, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    @Override
+    public void onReceiveValue(String value) {
+    }
+
+    private void selectFolder(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) {
+        JSONObject params = args.optJSONObject(0);
+        String folder = params.optString("folder").trim();
+        String title = params.optString("title", "Select Folder").trim();
+        boolean write = params.optBoolean("writable", true);
+
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        if (!folder.equals("")) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, folder);
+        }
+
+        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        if (write) {
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        }
+
+        startActivity(Intent.createChooser(intent, title), Action.selectFolder, callbackContext);
+    }
+
+    private void selectFile(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) throws JSONException {
+        JSONObject params = args.optJSONObject(0);
+        String folder = params.optString("folder").trim();
+        String title = params.optString("title", "Select File").trim();
+        boolean write = params.optBoolean("write", true);
+
+        JSONArray mimeTypesArray = params.getJSONArray("mimeTypes");
+        String[] supportedMimeTypes;
+        if (mimeTypesArray.length() == 0) {
+            supportedMimeTypes = new String[]{"*/*"};
+        } else {
+            supportedMimeTypes = new String[mimeTypesArray.length()];
+            for (int i = 0; i < mimeTypesArray.length(); i++) {
+                supportedMimeTypes[i] = mimeTypesArray.getString(i);
+            }
+        }
+
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            intent.setType(supportedMimeTypes.length == 1 ? supportedMimeTypes[0] : "*/*");
+            if (supportedMimeTypes.length > 0) {
+                intent.putExtra(Intent.EXTRA_MIME_TYPES, supportedMimeTypes);
+            }
+        } else {
+            intent.setType(String.join("|", supportedMimeTypes));
+        }
+
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        if (write) {
+            intent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        }
+
+        if (!folder.equals("")) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, folder);
+        }
+
+        startActivity(Intent.createChooser(intent, title), Action.selectFile, callbackContext);
+    }
+
+    public void openFolder(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) throws JSONException {
+        JSONObject params = args.getJSONObject(0);
+        Uri uri = Uri.parse(params.getString("uri"));
+        String title = params.optString("title", "Open Folder");
+
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(uri, DocumentsContract.Document.MIME_TYPE_DIR);
+
+        cordovaInterface.getContext().startActivity(Intent.createChooser(intent, title));
+
+        sendResult(callbackContext);
+    }
+
+    private void openFile(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) throws JSONException {
+        JSONObject params = args.getJSONObject(0);
+        Uri uri = Uri.parse(params.getString("uri"));
+        String title = params.optString("title", "Open File");
+
+        String mimeType = cordovaInterface.getContext().getContentResolver().getType(uri);
+        if (mimeType == null) {
+            mimeType = "*/*";
+        }
+
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        intent.setDataAndType(uri, mimeType);
+
+        cordovaInterface.getContext().startActivity(Intent.createChooser(intent, title));
+
+        sendResult(callbackContext);
+    }
+
+    private void readFile(@NonNull final CordovaArgs args, @NonNull final CallbackContext callbackContext) {
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject params = args.getJSONObject(0);
+                    Uri uri = Uri.parse(params.getString("uri"));
+
+                    DocumentFile file = DocumentFile.fromSingleUri(cordovaInterface.getContext(), uri);
+
+                    if (file == null || file.isDirectory() || !file.canRead()) {
+                        onError("could not open file", callbackContext);
+                        return;
+                    }
+
+                    int size = (int) file.length();
+                    String type = file.getType();
+
+                    try (
+                            InputStream inputStream = cordovaInterface.getContext().getContentResolver().openInputStream(file.getUri());
+                            ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream(size);
+                            Base64OutputStream outputStream = new Base64OutputStream(byteArrayOutputStream, Base64.DEFAULT)
+                    ) {
+                        if (inputStream == null) {
+                            onError("could not open file", callbackContext);
+                            return;
+                        }
+
+                        FileUtils.copy(inputStream, outputStream);
+
+                        JSONObject result = new JSONObject();
+                        result.put("data", byteArrayOutputStream.toString());
+                        result.put("type", type);
+
+                        sendResult(result, callbackContext);
+                    }
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void saveFile(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) throws JSONException {
+        JSONObject params = args.getJSONObject(0);
+        String data = params.getString("data").trim();
+        String folder = params.optString("folder").trim();
+        String filename = params.optString("filename").trim();
+        String mimeType = params.optString("mimeType").trim();
+
+        if (mimeType.equals("")) {
+            if (filename.equals("")) {
+                mimeType = "*/*";
+            } else {
+                mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(filename.substring(filename.lastIndexOf('.') + 1));
+
+                if (mimeType == null) {
+                    mimeType = "*/*";
+                }
+            }
+        }
+
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType(mimeType);
+
+        if (!folder.equals("")) {
+            intent.putExtra(DocumentsContract.EXTRA_INITIAL_URI, folder);
+        }
+
+        if (!filename.equals("")) {
+            intent.putExtra(Intent.EXTRA_TITLE, filename);
+        }
+
+        String callbackId = callbackContext.getCallbackId();
+        try {
+            saveFileData.put(callbackId, data);
+            startActivity(intent, Action.saveFile, callbackContext);
+        } catch (Throwable t) {
+            saveFileData.remove(callbackId);
+
+            throw t;
+        }
+    }
+
+    private void writeFile(@NonNull final CordovaArgs args, @NonNull final CallbackContext callbackContext) throws JSONException {
+        final JSONObject params = args.getJSONObject(0);
+        final String uriString = params.optString("uri").trim();
+
+        if (uriString.equals("")) {
+            writeMedia(args, callbackContext);
+
+            return;
+        }
+
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    String data = params.getString("data").trim();
+                    Uri uri = Uri.parse(uriString);
+
+                    DocumentFile file;
+                    try {
+                        file = DocumentFile.fromTreeUri(cordovaInterface.getContext(), uri);
+                    } catch (IllegalArgumentException e) {
+                        file = DocumentFile.fromSingleUri(cordovaInterface.getContext(), uri);
+                    }
+
+                    if (file == null) {
+                        onError("Could not open: " + uriString, callbackContext);
+                        return;
+                    }
+
+                    if (file.isFile()) {
+                        writeFile(file, data, callbackContext);
+                        return;
+                    }
+
+                    String path = params.getString("path").trim();
+                    String mimeType = params.optString("mimeType").trim();
+
+                    if (mimeType.equals("")) {
+                        mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(path.substring(path.lastIndexOf('.') + 1));
+
+                        if (mimeType == null) {
+                            mimeType = "*/*";
+                        }
+                    }
+
+                    if (path.startsWith("/")) {
+                        path = path.substring(1);
+                    }
+
+                    writeFile(file, path, data, mimeType, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void writeMedia(@NonNull final CordovaArgs args, @NonNull final CallbackContext callbackContext) {
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject params = args.getJSONObject(0);
+                    String data = params.getString("data").trim();
+                    String path = params.getString("path").trim();
+                    String mimeType = params.optString("mimeType").trim();
+
+                    if (mimeType.equals("")) {
+                        mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(path.substring(path.lastIndexOf('.') + 1));
+
+                        if (mimeType == null) {
+                            mimeType = "*/*";
+                        }
+                    }
+
+                    if (path.startsWith("/")) {
+                        path = path.substring(1);
+                    }
+
+                    writeMedia(path, data, mimeType, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void overwriteFile(@NonNull final CordovaArgs args, @NonNull final CallbackContext callbackContext) {
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject params = args.getJSONObject(0);
+                    String uriString = params.getString("uri").trim();
+                    String data = params.getString("data").trim();
+
+                    writeFile(Uri.parse(uriString), data, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void deleteFile(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) {
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject params = args.getJSONObject(0);
+                    String uriString = params.getString("uri").trim();
+
+                    int deleted = cordovaInterface.getContext().getContentResolver().delete(Uri.parse(uriString), null);
+
+                    sendResult(deleted, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void getInfo(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) {
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject params = args.getJSONObject(0);
+                    String uriString = params.getString("uri").trim();
+                    String path = params.optString("path").trim();
+
+                    Uri uri = Uri.parse(uriString);
+                    if (!path.equals("")) {
+                        uri = resolveContentUri(uri, path);
+
+                        if (uri == null) {
+                            onError("could not find file: " + uriString + " : " + path, callbackContext);
+                            return;
+                        }
+                    }
+
+                    fileInfo(uri, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void getUri(@NonNull CordovaArgs args, @NonNull CallbackContext callbackContext) {
+        cordovaInterface.getThreadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    JSONObject params = args.getJSONObject(0);
+                    String uriString = params.getString("uri").trim();
+                    String path = params.getString("path").trim();
+
+                    Uri uri = resolveContentUri(Uri.parse(uriString), path);
+
+                    JSONObject result = new JSONObject();
+                    result.put("uri", uri == null ? JSONObject.NULL : uri);
+
+                    sendResult(result, callbackContext);
+                } catch (Throwable t) {
+                    onError(t, callbackContext);
+                }
+            }
+        });
+    }
+
+    private void startActivity(@NonNull Intent intent, @NonNull Action action, @NonNull CallbackContext callbackContext) {
+        short index = ++lastCallbackIndex;
+        callbackContexts.put(index, callbackContext);
+
+        cordovaInterface.startActivityForResult(
+                this,
+                intent,
+                (action.value << 16) | index
+        );
+    }
+
+    private void fileInfo(@NonNull Uri uri, @NonNull CallbackContext callbackContext) throws JSONException {
+        DocumentFile file = DocumentFile.fromSingleUri(cordovaInterface.getContext(), uri);
+        if (file == null) {
+            onError("could not open file: " + uri, callbackContext);
+            return;
+        }
+
+        JSONObject result = new JSONObject();
+        result.put("uri", uri.toString());
+        result.put("name", file.getName());
+        result.put("lastModified", file.lastModified());
+        result.put("writable", file.canWrite());
+
+        if (file.isFile()) {
+            result.put("type", file.getType());
+            result.put("size", file.length());
+        }
+
+        sendResult(result, callbackContext);
+    }
+
+    private @Nullable Uri resolveContentUri(@NonNull Uri uri, @NonNull String path) {
+        DocumentFile parent = DocumentFile.fromTreeUri(
+                cordovaInterface.getContext(),
+                uri
+        );
+        if (parent == null || !parent.isDirectory()) {
+            return null;
+        }
+
+        String[] subFolders;
+        String filename;
+
+        int index = path.lastIndexOf("/");
+        if (index > 0) {
+            subFolders = path.substring(0, index).split("/");
+            filename = path.substring(index + 1);
+        } else {
+            subFolders = new String[]{};
+            filename = path;
+        }
+
+        StringBuilder currentPath = new StringBuilder();
+        for (String subFolder : subFolders) {
+            currentPath.append(subFolder);
+
+            DocumentFile currentFile = parent.findFile(subFolder);
+            if (currentFile == null || !currentFile.isDirectory()) {
+                return null;
+            }
+
+            parent = currentFile;
+            currentPath.append("/");
+        }
+
+        DocumentFile target = parent.findFile(filename);
+        if (target == null) {
+            return null;
+        }
+
+        return target.getUri();
+    }
+
+    private void writeFile(@NonNull DocumentFile parent, @NonNull String path, @NonNull String data, @NonNull String mimeType, @NonNull CallbackContext callbackContext) throws JSONException, IOException {
+        String[] subFolders;
+        String filename;
+
+        int index = path.lastIndexOf("/");
+        if (index > 0) {
+            subFolders = path.substring(0, index).split("/");
+            filename = path.substring(index + 1);
+        } else {
+            subFolders = new String[]{};
+            filename = path;
+        }
+
+        StringBuilder currentPath = new StringBuilder();
+        for (String subFolder : subFolders) {
+            currentPath.append(subFolder);
+
+            DocumentFile currentFile = parent.findFile(subFolder);
+            if (currentFile == null) {
+                currentFile = parent.createDirectory(subFolder);
+
+                if (currentFile == null) {
+                    onError("Could not create sub-folder: " + parent.getUri() + "/" + currentPath, callbackContext);
+                    return;
+                }
+            } else if (!currentFile.isDirectory()) {
+                onError("Target is not a directory: " + parent.getUri() + "/" + currentPath, callbackContext);
+                return;
+            }
+
+            parent = currentFile;
+            currentPath.append("/");
+        }
+
+        DocumentFile file = parent.findFile(filename);
+        if (file == null) {
+            file = parent.createFile(mimeType, filename);
+
+            if (file == null) {
+                onError("Could not create file: " + parent.getUri() + "/" + currentPath + "/" + filename, callbackContext);
+                return;
+            }
+        } else if (!file.isFile()) {
+            onError("Target is not a file file: " + parent.getUri() + "/" + currentPath + "/" + filename, callbackContext);
+            return;
+        }
+
+        writeFile(file, data, callbackContext);
+    }
+
+    private void writeMedia(@NonNull String fullPath, @NonNull String data, @NonNull String mimeType, @NonNull CallbackContext callbackContext) throws IOException, JSONException {
+        ContentResolver contentResolver = cordovaInterface.getContext().getContentResolver();
+
+        ContentValues contentValues = new ContentValues();
+        contentValues.put(MediaStore.MediaColumns.MIME_TYPE, mimeType);
+
+        int index = fullPath.lastIndexOf("/");
+        Uri volume;
+        if (index > 0) {
+            contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH, fullPath.substring(0, index));
+            contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, fullPath.substring(index + 1));
+            contentValues.put(MediaStore.MediaColumns.IS_PENDING, 1);
+
+            if (fullPath.startsWith("DCIM/") || fullPath.startsWith("Pictures/")) {
+                boolean isImage = mimeType.startsWith("image/");
+
+                if (!isImage && !mimeType.startsWith("video/")) {
+                    onError("can only store image or video files in DCIM/ or Pictures/ folder", callbackContext);
+                    return;
+                }
+
+                volume = isImage
+                        ? MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                        : MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
+            } else if (fullPath.startsWith("Movies")) {
+                if (!mimeType.startsWith("video/")) {
+                    onError("can only store video files in Movies/ folder", callbackContext);
+                    return;
+                }
+
+                volume = MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
+            } else if (
+                    fullPath.startsWith("Alarms/") ||
+                            fullPath.startsWith("Audiobooks/") ||
+                            fullPath.startsWith("Music/") ||
+                            fullPath.startsWith("Notifications/") ||
+                            fullPath.startsWith("Podcasts/") ||
+                            fullPath.startsWith("Recordings/") ||
+                            fullPath.startsWith("Ringtones/")
+            ) {
+                if (!mimeType.startsWith("audio/")) {
+                    onError("can only store audio files in Alarms/, Audiobooks/, Music/, Notifications/, Podcasts/, Recordings/ or Ringtones/ folder", callbackContext);
+                    return;
+                }
+
+                volume = MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL);
+            } else if (fullPath.startsWith("Downloads/")) {
+                volume = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL);
+            } else {
+                volume = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL);
+            }
+        } else {
+            contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, fullPath);
+            volume = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL);
+        }
+
+        Uri uri = contentResolver.insert(volume, contentValues);
+        if (uri == null) {
+            onError("Could not create file: " + fullPath, callbackContext);
+            return;
+        }
+
+        try (
+                OutputStream outputStream = contentResolver.openOutputStream(uri, "wt");
+                InputStream inputStream = new Base64InputStream(
+                        new ByteArrayInputStream(data.getBytes()),
+                        Base64.DEFAULT
+                )
+        ) {
+            if (outputStream == null) {
+                onError("Could not open file for writing: " + uri, callbackContext);
+                return;
+            }
+
+            FileUtils.copy(inputStream, outputStream);
+        }
+
+        contentValues.clear();
+        contentValues.put(MediaStore.MediaColumns.IS_PENDING, 0);
+        contentResolver.update(uri, contentValues, null, null);
+
+        fileInfo(uri, callbackContext);
+    }
+
+    private void writeFile(@NonNull DocumentFile file, @NonNull String data, @NonNull CallbackContext callbackContext) throws JSONException, IOException {
+        writeFile(file.getUri(), data, callbackContext);
+    }
+
+    private void writeFile(@NonNull final Uri uri, @NonNull final String data, @NonNull final CallbackContext callbackContext) throws IOException, JSONException {
+        try (
+                OutputStream outputStream = cordovaInterface.getContext().getContentResolver().openOutputStream(uri, "wt");
+                InputStream inputStream = new Base64InputStream(
+                        new ByteArrayInputStream(data.getBytes()),
+                        Base64.DEFAULT
+                )
+        ) {
+            if (outputStream == null) {
+                onError("Could not open file for writing: " + uri, callbackContext);
+                return;
+            }
+
+            FileUtils.copy(inputStream, outputStream);
+        }
+
+        fileInfo(uri, callbackContext);
+    }
+
+    private void onError(@NonNull Throwable throwable, @Nullable CallbackContext callbackContext) {
+        Log.w(getClass().getName(), throwable.getLocalizedMessage(), throwable);
+
+        String message;
+        try {
+            String stackTrace;
+            try (
+                    StringWriter stringWriter = new StringWriter();
+                    PrintWriter printWriter = new PrintWriter(stringWriter)
+            ) {
+                throwable.printStackTrace(printWriter);
+                stackTrace = stringWriter.toString();
+            }
+
+            message = throwable.getLocalizedMessage() + "\n" + stackTrace;
+        } catch (Throwable e) {
+            Log.d(getClass().getName(), e.getLocalizedMessage(), e);
+
+            message = throwable.getLocalizedMessage();
+        }
+
+        if (message == null) {
+            message = "Unknown error: " + throwable.getClass().getName();
+        }
+
+        sendError(message, callbackContext);
+    }
+
+    private void onError(@NonNull String message) {
+        onError(message, null);
+    }
+
+    private void onError(@NonNull String message, @Nullable CallbackContext callbackContext) {
+        Log.d(getClass().getName(), message);
+
+        sendError(message, callbackContext);
+    }
+
+    private void sendResult(@NonNull final CallbackContext callbackContext) {
+        cordovaInterface.getActivity().runOnUiThread(new Runnable() {
+            public void run() {
+                callbackContext.success();
+            }
+        });
+    }
+
+    private void sendResult(final int result, @NonNull final CallbackContext callbackContext) {
+        cordovaInterface.getActivity().runOnUiThread(new Runnable() {
+            public void run() {
+                callbackContext.success(result);
+            }
+        });
+    }
+
+    private void sendResult(@NonNull final JSONObject result, @NonNull final CallbackContext callbackContext) {
+        cordovaInterface.getActivity().runOnUiThread(new Runnable() {
+            public void run() {
+                callbackContext.success(result);
+            }
+        });
+    }
+
+    private void sendError(@NonNull final String message, @Nullable final CallbackContext callbackContext) {
+        cordovaInterface.getActivity().runOnUiThread(new Runnable() {
+            public void run() {
+                if (callbackContext != null) {
+                    callbackContext.error(message);
+                }
+
+                String jsMessage = message.replace("'", "\\'")
+                        .replace("\n", "\\n")
+                        .replace("\t", "\\t");
+
+                cordovaWebView.getEngine().evaluateJavascript(
+                        "console.error('" + jsMessage + "');",
+                        SafMediastore.this
+                );
+            }
+        });
+    }
 }

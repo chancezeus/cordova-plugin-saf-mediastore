@@ -1,33 +1,43 @@
-interface SafMediastore{
-	selectFolder(uri?:string):Promise<string>,
-	selectFile(uri?:string):Promise<string>,
-	openFolder(uri:string):Promise<void>,
-	openFile(uri:string):Promise<void>,
-	readFile(uri:string):Promise<ArrayBuffer>,
-	writeFile(params:{
-		data:string,
-		filename:string,
-		folder?:string,
-		subFolder?:string
-	}):Promise<string>,
-	overwriteFile(params:{
-		uri:string,
-		data:string
-	}):Promise<string>,
-	saveFile(params:{
-		data:string,
-		filename?:string,
-		folder?:string
-	}):Promise<string>,
-	deleteFile(uri:string):Promise<number>,
-	getFileName(uri:string):Promise<string>,
-	getUri(params:{
-		folder:string,
-		subFolder?:string,
-		filename?:string,
-	}):Promise<string>
+interface FileInfo {
+  uri: string;
+  name: string;
+  lastModified: number;
+  writable: boolean;
+  type?: string;
+  size?: number;
 }
 
-interface CordovaPlugins{
-	safMediastore:SafMediastore
+interface FileData {
+  data: string | ArrayBuffer | ArrayBufferView | Blob;
+  mimeType?: string | null;
+}
+
+interface SafMediastore {
+  selectFolder(params?: { folder?: string | null; title?: string | null; writable?: boolean | null } | null): Promise<FileInfo>;
+
+  selectFile(params?: { folder?: string | null; title?: string | null; writable?: boolean | null; mimeTypes?: string[] | null } | null): Promise<FileInfo>;
+
+  openFolder(params: { uri: string; title?: string | null }): Promise<void>;
+
+  openFile(params: { uri: string; title?: string | null }): Promise<void>;
+
+  readFile(params: { uri: string }): Promise<Blob>;
+
+  saveFile(params: FileData & { folder?: string | null; filename?: string | null }): Promise<FileInfo>;
+
+  writeFile(params: FileData & { uri: string; path?: string | null }): Promise<FileInfo>;
+
+  writeMedia(params: FileData & { path: string }): Promise<FileInfo>;
+
+  overwriteFile(params: FileData & { uri: string }): Promise<FileInfo>;
+
+  deleteFile(params: { uri: string }): Promise<number>;
+
+  getInfo(params: { uri: string }): Promise<FileInfo>;
+
+  getUri(params: { uri: string; path: string }): Promise<{ uri: string | null }>;
+}
+
+interface CordovaPlugins {
+  safMediastore: SafMediastore;
 }
